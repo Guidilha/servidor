@@ -18,17 +18,25 @@ import os
 CHECKPOINT_FILE = "experiment_checkpoint.json" 
 
 class ModelEvaluator:
-    def __init__(self, model, model_hyperparameter_space, test_size, cross_validation_folds, scale_data, num_seeds, evaluation_metric, results_logging_directory, experiment_name=None, random_state=42):
+    def __init__(self, model, test_size, cross_validation_folds, scale_data, num_seeds, evaluation_metric, results_logging_directory, experiment_name=None, init_hyperparameter_space=None, hypernn_hyperparameter_space=None, model_hyperparameter_space=None, random_state=42):
         self.model = model
         self.cross_validation_folds = cross_validation_folds
         self.evaluation_metric = evaluation_metric
         self.test_size = test_size
         self.num_seeds = num_seeds
-        self.model_hyperparameter_space = model_hyperparameter_space
+        if init_hyperparameter_space is not None and hypernn_hyperparameter_space is not None:
+            self.init_hyperparameter_space = init_hyperparameter_space
+            self.hypernn_hyperparameter_space = hypernn_hyperparameter_space
+            self.model_hyperparameter_space = {**init_hyperparameter_space, **hypernn_hyperparameter_space}
+        else:
+            self.init_hyperparameter_space = init_hyperparameter_space
+            self.hypernn_hyperparameter_space = hypernn_hyperparameter_space
+            self.model_hyperparameter_space = model_hyperparameter_space or {}
+
         self.scale_data = scale_data
         self.results = []
         self.logger = None
-        self.results_filepath = ''
+        self.results_filepath = ""
         self.random_state = random_state
         self.experiment_name = experiment_name
         self.configure_logging_and_results(results_logging_directory)
@@ -158,19 +166,53 @@ class ModelEvaluator:
                 X_train = scaler.transform(X_train)
                 X_test = scaler.transform(X_test)
             
-            gridsearch = HyperparameterGridSearch(
-                self.model, 
-                self.model_hyperparameter_space, 
-                num_cross_validation_folds=self.cross_validation_folds,
-                evaluation_metric=self.evaluation_metric, 
-                random_state=seed)
-            
-            # Search for hyperparameters
-            start_grid_search_time = time.time()
-            best_model = gridsearch.fit(X_train, y_train)
-            end_grid_search_time = time.time()
-            
-            grid_search_time = end_grid_search_time - start_grid_search_time
+            t0_search = time.time()
+            best_params_combined = {}
+
+            # Se as duas grids de busca estiverem definidas (Estágio 1 e 2)
+            if self.init_hyperparameter_space and self.hypernn_hyperparameter_space:
+                # --- ESTÁGIO 1: Busca dos parâmetros de inicialização ---
+                init_gridsearch = HyperparameterGridSearch(
+                    self.model,
+                    self.init_hyperparameter_space,
+                    num_cross_validation_folds=self.cross_validation_folds,
+                    evaluation_metric=self.evaluation_metric,
+                    random_state=seed,
+                )
+                best_init_model = init_gridsearch.fit(X_train, y_train)
+                
+                # Executa fit_init para travar o resultado da inicialização
+                if hasattr(best_init_model, "fit_init"):
+                    best_init_model.fit_init(X_train, y_train)
+
+                # --- ESTÁGIO 2: Busca dos parâmetros da HyperNN ---
+                hypernn_gridsearch = HyperparameterGridSearch(
+                    best_init_model,
+                    self.hypernn_hyperparameter_space,
+                    num_cross_validation_folds=self.cross_validation_folds,
+                    evaluation_metric=self.evaluation_metric,
+                    random_state=seed,
+                )
+                best_model = hypernn_gridsearch.fit(X_train, y_train)
+                
+                best_params_combined = {
+                    **init_gridsearch.best_model_hyperparameters,
+                    **hypernn_gridsearch.best_model_hyperparameters,
+                }
+            else:
+                # Modo legado: Grid unificada única
+                gridsearch = HyperparameterGridSearch(
+                    self.model,
+                    self.model_hyperparameter_space,
+                    num_cross_validation_folds=self.cross_validation_folds,
+                    evaluation_metric=self.evaluation_metric,
+                    random_state=seed,
+                )
+                best_model = gridsearch.fit(X_train, y_train)
+                best_params_combined = gridsearch.best_model_hyperparameters
+
+            grid_search_time = time.time() - t0_search
+
             tb_logger = HyperNNTensorBoardLogger(log_dir="runs")
             # Train best model
             start_train_time = time.time()
@@ -197,7 +239,7 @@ class ModelEvaluator:
             curret_result_report = self.create_experiment_report(
                 dataset_name=dataset_name,
                 dataset_label=label,
-                best_model_hyperparameters=gridsearch.best_model_hyperparameters, 
+                best_model_hyperparameters=best_params_combined, 
                 training_scores=train_scores, 
                 test_scores=test_scores, 
                 hyperparameter_search_time=grid_search_time, 
@@ -213,7 +255,7 @@ class ModelEvaluator:
                 "init_time": initialization_time, 
                 "prediction_time": prediction_time, 
                 "final_nboxes": best_model.get_num_boxes(), 
-                "best_params": gridsearch.best_model_hyperparameters, } 
+                "best_params": best_params_combined, } 
             self.results.append(result_entry)
              
             tb_logger = HyperNNTensorBoardLogger(log_dir="runs") 

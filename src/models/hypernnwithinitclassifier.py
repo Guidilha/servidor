@@ -49,6 +49,9 @@ class HyperNNWithInitClassifier(AbstractClassifier):
         self.learning_rate = learning_rate
         self.patience_early_stopping = patience_early_stopping
         self.clf = None
+        self.mins_tensor = None
+        self.lengths_tensor = None
+        self.init_time = 0.0
 
     def calcular_comprimentos_topologicos_som(
         self, som_weights_3d, x, y, dim, gamma=None
@@ -190,12 +193,19 @@ class HyperNNWithInitClassifier(AbstractClassifier):
         torch.nn.init.xavier_uniform_(lengths_tensor)
         lengths_tensor = torch.abs(lengths_tensor)
         return mins_tensor, lengths_tensor
-
-    def fit(self, X, y):
+      
+    def fit_init(self, X, y=None):
         self.dim = X.shape[1]
-        X_target = X[y == 1] if 1 in y else X
+        X_target = X[y == 1] if (y is not None and 1 in y) else X
+
         if self.init_strategy == "som":
-            params_key = (self.nboxes, self.som_sigma, self.som_lr, self.gamma_escala, self.random_state)
+            params_key = (
+                self.nboxes,
+                self.som_sigma,
+                self.som_lr,
+                self.gamma_escala,
+                self.random_state,
+            )
         elif self.init_strategy == "kmeans":
             params_key = (self.nboxes, self.gamma_escala, self.random_state)
         elif self.init_strategy == "dbscan":
@@ -206,31 +216,48 @@ class HyperNNWithInitClassifier(AbstractClassifier):
         data_hash = hash(X_target.tobytes()) if len(X_target) > 0 else 0
         cache_key = (self.init_strategy, params_key, data_hash)
 
-        if self.init_strategy != "random" and cache_key in HyperNNWithInitClassifier._init_cache:
-            mins_tensor, lengths_tensor, init_computation_time = HyperNNWithInitClassifier._init_cache[cache_key]
+        if self.init_strategy != "random" and cache_key in HyperNNWithInitClassifier._init_cache:(self.mins_tensor,self.lengths_tensor,self.init_time) = HyperNNWithInitClassifier._init_cache[cache_key]
         else:
             t0_init = time.time()
-            mins_tensor, lengths_tensor = None, None
+            self.mins_tensor, self.lengths_tensor = None, None
 
             if self.init_strategy == "som" and len(X_target) > 0:
-                mins_tensor, lengths_tensor = self.calculate_som_init(X_target)
+                self.mins_tensor, self.lengths_tensor = self.calculate_som_init(
+                    X_target
+                )
             elif self.init_strategy == "kmeans" and len(X_target) > 0:
-                mins_tensor, lengths_tensor = self.calculate_kmeans_init(X_target)
+                self.mins_tensor, self.lengths_tensor = self.calculate_kmeans_init(
+                    X_target
+                )
             elif self.init_strategy == "dbscan" and len(X_target) > 0:
-                mins_tensor, lengths_tensor = self.calculate_dbscan_init(X_target)
+                self.mins_tensor, self.lengths_tensor = self.calculate_dbscan_init(
+                    X_target
+                )
             elif self.init_strategy == "random":
                 pass
             elif self.init_strategy == "xavier":
-                mins_tensor, lengths_tensor = self.calculate_xavier_init(self.dim)
-            init_computation_time = time.time() - t0_init
+                self.mins_tensor, self.lengths_tensor = self.calculate_xavier_init(
+                    self.dim
+                )
 
+            self.init_time = time.time() - t0_init
             if self.init_strategy != "random":
-                HyperNNWithInitClassifier._init_cache[cache_key] = (mins_tensor, lengths_tensor, init_computation_time)
+                HyperNNWithInitClassifier._init_cache[cache_key] = (
+                    self.mins_tensor,
+                    self.lengths_tensor,
+                    self.init_time,
+                )
+        return self      
+         
+            
+    def fit(self, X, y):
+        self.dim = X.shape[1]
 
-        self.init_time = init_computation_time
+        if self.mins_tensor is None and self.init_strategy != "random":
+            self.fit_init(X, y)
 
-        if mins_tensor is not None and lengths_tensor is not None:
-            actual_nboxes = mins_tensor.shape[0]
+        if self.mins_tensor is not None and self.lengths_tensor is not None:
+            actual_nboxes = self.mins_tensor.shape[0]
         else:
             actual_nboxes = self.nboxes
 
@@ -248,11 +275,11 @@ class HyperNNWithInitClassifier(AbstractClassifier):
             patience_early_stopping=self.patience_early_stopping,
         )
 
-        if mins_tensor is not None and lengths_tensor is not None:
+        if getattr(self, "mins_tensor", None) is not None and getattr(self, "lengths_tensor", None) is not None:
             with torch.no_grad():
-                self.clf.model.block.mins.copy_(mins_tensor.to(self.device))
+                self.clf.model.block.mins.copy_(self.mins_tensor.to(self.device))
                 self.clf.model.block.length.copy_(
-                    lengths_tensor.to(self.device)
+                    self.lengths_tensor.to(self.device)
                 )
             if self.init_strategy == "som":
                 self.clf.model.block.mins.requires_grad = True
@@ -264,8 +291,42 @@ class HyperNNWithInitClassifier(AbstractClassifier):
     def predict(self, X):
         return self.clf.predict(X)
 
+    def get_hyperparameters(self):
+        """Retorna todos os parâmetros de configuração da instância."""
+        return {
+            "nboxes": self.nboxes,
+            "init_strategy": self.init_strategy,
+            "som_sigma": self.som_sigma,
+            "som_lr": self.som_lr,
+            "gamma_escala": self.gamma_escala,
+            "dbscan_eps": self.dbscan_eps,
+            "dbscan_min_samples": self.dbscan_min_samples,
+            "tau": self.tau,
+            "alpha": self.alpha,
+            "alpha_tau_decay_step": self.alpha_tau_decay_step,
+            "device": self.device,
+            "l1_reg": self.l1_reg,
+            "l2_reg": self.l2_reg,
+            "training_epochs": self.training_epochs,
+            "random_state": self.random_state,
+            "learning_rate": self.learning_rate,
+            "patience_early_stopping": self.patience_early_stopping,
+        }
+
     def set_hyperparameters(self, hyperparameters: dict):
-        return HyperNNWithInitClassifier(**hyperparameters)
+        """Cria uma nova instância mantendo os parâmetros existentes e aplicando as atualizações."""
+        params = self.get_hyperparameters()
+        params.update(hyperparameters)
+
+        new_model = HyperNNWithInitClassifier(**params)
+
+        # Preserva os tensores de inicialização caso já tenham sido gerados no fit_init
+        if getattr(self, "mins_tensor", None) is not None:
+            new_model.mins_tensor = self.mins_tensor
+            new_model.lengths_tensor = self.lengths_tensor
+            new_model.init_time = self.init_time
+
+        return new_model
 
     def get_num_boxes(self):
         lengths = (

@@ -34,47 +34,62 @@ def parse_experiments_parameters():
 
 def get_hypernn_and_hyperparameters(experiment_options):
     device = tsetup.set_device(cuda=experiment_options.use_cuda)
-
     model = HyperNNWithInitClassifier()
 
-    if experiment_options.init_strategy == 'all': 
-      strategies = ['som', 'random', 'kmeans', 'dbscan'] 
-    else: 
-      strategies = [experiment_options.init_strategy]
+    strategy = experiment_options.init_strategy
 
-    hparam_grid = {
-        'init_strategy'           : [experiment_options.init_strategy],
-        'som_sigma'               : [1.0],
-        'som_lr'                  : [0.5],
-        'gamma_escala'            : [1.0,8.0],
-        #'dbscan_eps'              : [0.1,0.5,1],
-        #'dbscan_min_samples'      : [1,5],
-        'nboxes'                  : [2,6,20], #experiment_options.max_number_of_boxes],
-        'device'                  : [device],
-        'training_epochs'         : [experiment_options.max_train_epochs],
-        'patience_early_stopping' : [experiment_options.patience],
-        'learning_rate'           : [0.05],
-        'l1_reg'                  : [0], #1e-3
-        'l2_reg'                  : [0], #1e-3
-        'alpha_tau_decay_step'    : [10],
-        'alpha'                   : [experiment_options.alpha],
-        'tau'                     : [1.0, 5.0],
+    if strategy == "som":
+        init_param_grid = {
+            "init_strategy": ["som"],
+            "som_sigma": [1.0],
+            "som_lr": [1.0],
+            "gamma_escala": [1.0, 8.0],
+            "nboxes": [2, 5, 20],
+        }
+    elif strategy == "dbscan":
+        init_param_grid = {
+            "init_strategy": ["dbscan"],
+            "dbscan_eps": [0.1, 0.5, 1.0],
+            "dbscan_min_samples": [0.5, 1.0, 1, 5],
+            "gamma_escala": [1.0, 8.0],
+        }
+    elif strategy == "kmeans":
+        init_param_grid = {
+            "init_strategy": ["kmeans"],
+            "nboxes": [2, 5, 12, 20],
+            "gamma_escala": [1.0, 8.0],
+        }
+    else:
+        init_param_grid = {
+            "init_strategy": [strategy],
+            "gamma_escala": [1.0],
+        }
+
+    hypernn_param_grid = {
+        "device": [device],
+        "training_epochs": [experiment_options.max_train_epochs],
+        "patience_early_stopping": [experiment_options.patience],
+        "learning_rate": [0.05],
+        "l1_reg": [0],
+        "l2_reg": [0],
+        "alpha_tau_decay_step": [10],
+        "alpha": [experiment_options.alpha],
+        "tau": [1.0],
     }
 
-    return model, hparam_grid
+    return model, init_param_grid, hypernn_param_grid
 
 def main(experiment_options):
     model_name = experiment_options.model_name
 
-    if model_name == 'prim':
-        model, hyperparameters = get_prim_and_hyperparameters(experiment_options)
-    elif model_name == 'hypernn':
-        model, hyperparameters = get_hypernn_and_hyperparameters(experiment_options)
+    if model_name == 'hypernn':
+        model, init_param_grid, hypernn_param_grid = get_hypernn_and_hyperparameters(experiment_options)
     else:
         return NotImplementedError(f'{model_name} is not implemented.')
 
     print(model_name)
-    print(hyperparameters)
+    print(init_param_grid)
+    print(hypernn_param_grid) 
 
     #datasets = [ load_dataset(ds_name) for ds_name in DATASET_REGISTRIES["openml_datasets"] ]
     
@@ -85,15 +100,16 @@ def main(experiment_options):
     else:
         datasets = datasets = [
             collector.load_iris(),
-            collector.load_wine(),
-            collector.load_breast_cancer(),
-            collector.load_digits(),
-            collector.load_vehicle(),
+            #collector.load_wine(),
+            #collector.load_breast_cancer(),
+            #collector.load_digits(),
+            #collector.load_vehicle(),
         ]
 
     evaluator = ModelEvaluator(
         model = model,
-        model_hyperparameter_space = hyperparameters,
+        init_hyperparameter_space=init_param_grid,
+        hypernn_hyperparameter_space=hypernn_param_grid,
         test_size=experiment_options.test_size,
         cross_validation_folds=experiment_options.num_cv_folds,
         scale_data=experiment_options.scaling,
